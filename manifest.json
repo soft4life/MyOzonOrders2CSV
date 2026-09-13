@@ -1,0 +1,22 @@
+{
+  "manifest_version": 3,
+  "name": "OzonMyOrders2csv",
+  "version": "0.8.10",
+  "description": "Экспортирует историю заказов из личного кабинета покупателя Ozon в CSV.",
+  "permissions": ["activeTab", "tabs", "storage"],
+  "host_permissions": ["https://ozon.ru/*", "https://www.ozon.ru/*"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "OzonMyOrders2csv",
+    "default_popup": "popup.html"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://ozon.ru/*", "https://www.ozon.ru/*"],
+      "js": ["return-tools.js", "content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}

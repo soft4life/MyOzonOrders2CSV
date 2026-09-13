@@ -28,26 +28,72 @@
   }
 
   function addRealPrices(products, detail = {}) {
-    const prepared = (products || []).map((product) => {
-      const quantity = Math.max(1, Number.parseInt(product.quantity, 10) || 1);
-      const unitPrice = numberMoney(product.price);
-      return { ...product, quantity: String(quantity), unitPrice, linePrice: unitPrice * quantity };
-    });
-    const displayedTotal = prepared.reduce((sum, product) => sum + product.linePrice, 0);
     const goodsTotal = numberMoney(detail.goodsTotal);
     const deliveryTotal = numberMoney(detail.deliveryTotal);
     const bonusPayment = numberMoney(detail.bonusPayment);
     const paidTotal = numberMoney(detail.total);
+
+    let prepared = (products || []).map((product) => {
+      const quantity = Math.max(1, Number.parseInt(product.quantity, 10) || 1);
+      const rawPrice = numberMoney(product.price);
+      return { ...product, quantity: String(quantity), rawPrice, unitPrice: rawPrice };
+    });
+
+    // Ozon иногда отдаёт для позиции с количеством >1 сумму строки вместо цены единицы.
+    // Если итог «Товары» позволяет однозначно проверить раскладку, выбираем вариант,
+    // при котором сумма товарных строк совпадает с ценой товаров после списания баллов.
+    const displayedGoodsTarget = goodsTotal > 0
+      ? Math.max(0, goodsTotal - bonusPayment)
+      : 0;
+    if (displayedGoodsTarget > 0) {
+      const ambiguous = prepared
+        .map((product, index) => ({ product, index }))
+        .filter(({ product }) => Number(product.quantity) > 1 && product.rawPrice > 0);
+
+      if (ambiguous.length > 0 && ambiguous.length <= 12) {
+        let best = null;
+        const variants = 1 << ambiguous.length;
+        for (let mask = 0; mask < variants; mask += 1) {
+          const unitPrices = prepared.map((product) => product.rawPrice);
+          for (let bit = 0; bit < ambiguous.length; bit += 1) {
+            const { product, index } = ambiguous[bit];
+            if (mask & (1 << bit)) unitPrices[index] = product.rawPrice / Number(product.quantity);
+          }
+          const sum = prepared.reduce(
+            (acc, product, index) => acc + unitPrices[index] * Number(product.quantity),
+            0
+          );
+          const error = Math.abs(sum - displayedGoodsTarget);
+          if (!best || error < best.error) best = { error, unitPrices };
+        }
+        if (best && best.error <= 0.02) {
+          prepared = prepared.map((product, index) => ({
+            ...product,
+            unitPrice: best.unitPrices[index]
+          }));
+        }
+      }
+    }
+
+    const displayedTotal = prepared.reduce(
+      (sum, product) => sum + product.unitPrice * Number(product.quantity),
+      0
+    );
     const targetTotal = goodsTotal > 0
       ? goodsTotal + deliveryTotal
-      : (paidTotal > 0 ? paidTotal + bonusPayment : displayedTotal + deliveryTotal);
-    const needsRedistribution = bonusPayment > 0 || deliveryTotal > 0;
+      : (paidTotal > 0 ? paidTotal + bonusPayment : displayedTotal + bonusPayment + deliveryTotal);
+
+    // Реальную цену перераспределяем только в заказах, где Ozon списал баллы.
+    // База распределения — фактически отображаемые цены товаров после баллов;
+    // целевая сумма — полная стоимость заказа до баллов: «Товары + Доставка».
+    const needsRedistribution = bonusPayment > 0;
     const factor = needsRedistribution && displayedTotal > 0 && targetTotal > 0
       ? targetTotal / displayedTotal
       : 1;
 
-    return prepared.map(({ unitPrice, linePrice, ...product }) => ({
+    return prepared.map(({ rawPrice, unitPrice, ...product }) => ({
       ...product,
+      price: moneyValue(unitPrice),
       realPrice: moneyValue(unitPrice * factor)
     }));
   }

@@ -9,6 +9,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return;
   }
 
+  if (message?.type === 'OZON_DOWNLOAD_DATA_URL') {
+    downloadDataUrl(message.dataUrl, message.filename)
+      .then((downloadId) => sendResponse({ ok: true, downloadId }))
+      .catch((error) => sendResponse({ ok: false, error: error.message }));
+    return true;
+  }
+
   if (message?.type !== 'OZON_PARSE_DETAIL_IN_TAB') return;
   parseDetailInTab(message.url, message.options || {}, sender.tab?.id)
     .then((detail) => sendResponse({ ok: true, detail }))
@@ -139,4 +146,21 @@ function waitForComplete(tabId, timeoutMs) {
 
 function wait(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+
+async function downloadDataUrl(dataUrl, filename) {
+  if (typeof dataUrl !== 'string' || !dataUrl.startsWith('data:')) {
+    throw new Error('Некорректные данные для скачивания');
+  }
+  const safeFilename = String(filename || 'ozon_export.csv')
+    .replace(/[\\/:*?"<>|]/g, '_')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return chrome.downloads.download({
+    url: dataUrl,
+    filename: safeFilename || 'ozon_export.csv',
+    saveAs: false,
+    conflictAction: 'uniquify'
+  });
 }

@@ -1,10 +1,10 @@
 (() => {
   const OVERLAY_ID = 'obo-export-overlay';
-  const ORDER_CACHE_SCHEMA = 2;
+  const ORDER_CACHE_SCHEMA = 3;
   const ORDER_CACHE_PREFIX = `obo-order-cache-v${ORDER_CACHE_SCHEMA}:`;
   const CSV_COLUMNS = [
     'Дата заказа', 'Год', 'Месяц', 'Номер заказа', 'Статус', 'Статус возврата', 'Товар', 'Количество',
-    'Цена товара', 'Реальная цена', 'Сумма заказа', 'Ссылка на товар', 'Ссылка на заказ'
+    'Цена товара', 'Реальная цена', 'Реальная цена товара всего', 'Сумма заказа', 'Ссылка на товар', 'Ссылка на заказ'
   ];
   let running = false;
   let stopRequested = false;
@@ -75,43 +75,100 @@
 
   async function runExport(options) {
     createOverlay();
-    addDiagnostic('info', 'Выгрузка запущена');
-    updateOverlay('Проверяю страницу заказов…');
 
-    if (!/\/my\/order/i.test(location.pathname)) {
+    const singleOrder = normalizeSpecificOrder(options.specificOrderUrl || options.specificOrder || '');
+    const singleOrderMode = Boolean(singleOrder.orderNumber);
+    const runOptions = singleOrderMode
+      ? {
+          ...options,
+          dateFrom: '',
+          dateTo: '',
+          autoScroll: false,
+          maxScrolls: '',
+          specificOrder: singleOrder.orderNumber,
+          specificOrderUrl: singleOrder.orderUrl
+        }
+      : options;
+
+    if (singleOrderMode && diagnostics) {
+      diagnostics.options = {
+        ...diagnostics.options,
+        dateFrom: '',
+        dateTo: '',
+        autoScroll: false,
+        maxScrolls: '',
+        specificOrder: singleOrder.orderNumber,
+        specificOrderUrl: singleOrder.orderUrl
+      };
+    }
+
+    addDiagnostic('info', singleOrderMode
+      ? 'Выгрузка конкретного заказа запущена'
+      : 'Выгрузка запущена', singleOrderMode ? {
+        orderNumber: singleOrder.orderNumber,
+        orderUrl: singleOrder.orderUrl
+      } : {});
+
+    updateOverlay(singleOrderMode
+      ? `Проверяю заказ ${singleOrder.orderNumber}…`
+      : 'Проверяю страницу заказов…');
+
+    if (!singleOrderMode && !/\/my\/order/i.test(location.pathname)) {
       updateOverlay('Откройте раздел Ozon → Заказы и запустите экспорт снова.', true);
       return;
     }
 
-    const captured = options.autoScroll
-      ? await loadAllOrders(options)
-      : { rows: [], orderKeys: [] };
+    const captured = singleOrderMode
+      ? {
+          rows: [buildRow({
+            orderNumber: singleOrder.orderNumber,
+            orderUrl: singleOrder.orderUrl
+          })],
+          orderKeys: [singleOrder.orderNumber],
+          earliestDate: '',
+          earliestReceiptDate: '',
+          scrollLimitReached: false,
+          stoppedByReceiptDate: false,
+          singleOrder: true
+        }
+      : (runOptions.autoScroll
+        ? await loadAllOrders(runOptions)
+        : { rows: [], orderKeys: [] });
 
-    addDiagnostic('info', 'Список заказов собран', {
+    addDiagnostic('info', singleOrderMode ? 'Конкретный заказ подготовлен' : 'Список заказов собран', {
       rows: captured.rows.length,
       orderKeys: captured.orderKeys.length,
       earliestDate: captured.earliestDate || '',
       earliestReceiptDate: captured.earliestReceiptDate || '',
       scrollLimitReached: Boolean(captured.scrollLimitReached),
-      stoppedByReceiptDate: Boolean(captured.stoppedByReceiptDate)
+      stoppedByReceiptDate: Boolean(captured.stoppedByReceiptDate),
+      specificOrder: singleOrder.orderNumber || ''
     });
 
     if (stopRequested) {
-      await offerStoppedExport(captured.rows, 'Загрузка списка заказов');
+      await offerStoppedExport(captured.rows, singleOrderMode ? 'Подготовка конкретного заказа' : 'Загрузка списка заказов');
       return;
     }
 
-    updateOverlay('Собираю товары и суммы…');
-    const current = collectOrders(options, Boolean(options.autoScroll));
-    const baseRows = uniqueBy([...captured.rows, ...current.rows], (row) => JSON.stringify(row));
+    let baseRows;
+    if (singleOrderMode) {
+      baseRows = captured.rows;
+    } else {
+      updateOverlay('Собираю товары и суммы…');
+      const current = collectOrders(runOptions, Boolean(runOptions.autoScroll));
+      baseRows = uniqueBy([...captured.rows, ...current.rows], (row) => JSON.stringify(row));
+    }
+
     if (!baseRows.length) {
-      updateOverlay('Заказы не найдены. Прокрутите страницу вручную и повторите экспорт.', true);
+      updateOverlay(singleOrderMode
+        ? 'Не удалось подготовить указанный заказ.'
+        : 'Заказы не найдены. Прокрутите страницу вручную и повторите экспорт.', true);
       return;
     }
 
-    const result = await enrichOrders(baseRows, options);
+    const result = await enrichOrders(baseRows, runOptions);
     if (stopRequested) {
-      await offerStoppedExport(result.rows, 'Получение состава заказов', {
+      await offerStoppedExport(result.rows, singleOrderMode ? 'Получение конкретного заказа' : 'Получение состава заказов', {
         returnedQuantity: result.returnedQuantity,
         excludedReturns: result.excludedReturns,
         cacheHits: result.cacheHits,
@@ -120,30 +177,65 @@
       return;
     }
     if (!result.rows.length) {
-      updateOverlay('По выбранному периоду после исключения отмен и возвратов заказов не найдено.', true);
+      updateOverlay(singleOrderMode
+        ? `Заказ ${singleOrder.orderNumber} не дал строк для CSV после применения правил возврата.`
+        : 'По выбранному периоду после исключения отмен и возвратов заказов не найдено.', true);
       return;
     }
 
-    const csv = makeCsv(result.rows, options, {
+    const stopReason = singleOrderMode
+      ? `Обработан конкретный заказ ${singleOrder.orderNumber}.`
+      : (captured.stoppedByReceiptDate
+        ? 'Диапазон просмотрен полностью: в списке начались товары, полученные раньше даты «от». Ничего исправлять не нужно.'
+        : (captured.scrollLimitReached
+          ? 'Достигнут лимит прокруток. Если нужные заказы не попали в файл, увеличьте лимит до 100 и повторите выгрузку.'
+          : 'Достигнут конец списка заказов. Ничего исправлять не нужно.'));
+
+    const csv = makeCsv(result.rows, runOptions, {
       orders: result.orders,
       rows: result.rows.length,
       excludedReturns: result.excludedReturns,
       returnedQuantity: result.returnedQuantity,
       cacheHits: result.cacheHits,
       cacheWrites: result.cacheWrites,
-      stopReason: captured.stoppedByReceiptDate
-        ? 'Диапазон просмотрен полностью: в списке начались товары, полученные раньше даты «от». Ничего исправлять не нужно.'
-        : (captured.scrollLimitReached
-          ? 'Достигнут лимит прокруток. Если нужные заказы не попали в файл, увеличьте лимит до 100 и повторите выгрузку.'
-          : 'Достигнут конец списка заказов. Ничего исправлять не нужно.')
+      stopReason
     });
-    downloadCsv(csv, buildExportFilename(options));
-    const limitedBeforeRange = captured.scrollLimitReached && options.dateFrom &&
-      (!captured.earliestDate || captured.earliestDate > options.dateFrom);
+    downloadCsv(csv, buildExportFilename(runOptions));
+
+    const limitedBeforeRange = !singleOrderMode && captured.scrollLimitReached && runOptions.dateFrom &&
+      (!captured.earliestDate || captured.earliestDate > runOptions.dateFrom);
     updateOverlay(
-      `Готово: ${result.orders} заказов, ${result.rows.length} строк, из кэша: ${result.cacheHits}, сохранено в кэш: ${result.cacheWrites}, исключено возвратов: ${result.excludedReturns}. CSV скачан.` +
-      (limitedBeforeRange ? ' Достигнут лимит прокруток раньше даты «от» — для полного периода увеличьте его.' : '')
+      singleOrderMode
+        ? `Готово: заказ ${singleOrder.orderNumber}, ${result.rows.length} строк, из кэша: ${result.cacheHits}, сохранено в кэш: ${result.cacheWrites}, исключено возвратов: ${result.excludedReturns}. CSV скачан.`
+        : (`Готово: ${result.orders} заказов, ${result.rows.length} строк, из кэша: ${result.cacheHits}, сохранено в кэш: ${result.cacheWrites}, исключено возвратов: ${result.excludedReturns}. CSV скачан.` +
+          (limitedBeforeRange ? ' Достигнут лимит прокруток раньше даты «от» — для полного периода увеличьте его.' : ''))
     );
+  }
+
+  function normalizeSpecificOrder(value) {
+    const raw = clean(value);
+    if (!raw) return { orderNumber: '', orderUrl: '' };
+
+    if (/^[\d-]{6,}$/.test(raw)) {
+      return {
+        orderNumber: raw,
+        orderUrl: `https://www.ozon.ru/my/orderdetails/?order=${encodeURIComponent(raw)}`
+      };
+    }
+
+    try {
+      const parsed = new URL(raw, location.origin);
+      if (!/(^|\.)ozon\.ru$/i.test(parsed.hostname)) return { orderNumber: '', orderUrl: '' };
+      const orderNumber = parsed.searchParams.get('order') || parsed.searchParams.get('orderNumber') ||
+        parsed.searchParams.get('orderId') || parsed.pathname.match(/\/orderdetails\/(\d[\d-]{5,})/i)?.[1] || '';
+      if (!/^[\d-]{6,}$/.test(orderNumber)) return { orderNumber: '', orderUrl: '' };
+      return {
+        orderNumber,
+        orderUrl: `https://www.ozon.ru/my/orderdetails/?order=${encodeURIComponent(orderNumber)}`
+      };
+    } catch {
+      return { orderNumber: '', orderUrl: '' };
+    }
   }
 
   async function enrichOrders(baseRows, options) {
@@ -490,17 +582,46 @@
         .map((anchor) => productFromAnchor(anchor, doc.body))
         .filter((product) => product.product);
     const products = mergeProducts([...linkedProducts, ...extractProductsByPrice(doc.body)]);
+    const summary = extractOrderSummaryFromDocument(doc);
 
     return {
       status,
       orderDate: extractOrderDate(fullText),
-      total: extractMoneyAfterLabel(fullText, ['Итого', 'Сумма заказа', 'Оплачено']),
-      goodsTotal: extractMoneyAfterLabel(fullText, ['Товары']),
-      bonusPayment: extractMoneyAfterLabel(fullText, ['Оплата баллами Ozon']),
-      deliveryTotal: extractMoneyAfterLabel(fullText, ['Доставка']),
+      total: summary.paidTotal || extractMoneyAfterLabel(fullText, ['Итого', 'Сумма заказа', 'Оплачено']),
+      goodsTotal: summary.goodsTotal || '',
+      bonusPayment: summary.bonusPayment || '',
+      deliveryTotal: summary.deliveryTotal || '',
       returnUrl: findReturnUrl(doc),
       products
     };
+  }
+
+  function extractOrderSummaryFromDocument(doc) {
+    return {
+      goodsTotal: extractMoneyNearExactLabel(doc, 'Товары'),
+      deliveryTotal: extractMoneyNearExactLabel(doc, 'Доставка'),
+      bonusPayment: extractMoneyNearExactLabel(doc, 'Оплата баллами Ozon'),
+      paidTotal: extractMoneyNearExactLabel(doc, 'Оплачено')
+    };
+  }
+
+  function extractMoneyNearExactLabel(doc, label) {
+    if (!doc?.querySelectorAll) return '';
+    const candidates = [...doc.querySelectorAll('div,span,p')]
+      .filter((node) => clean(node.textContent).toLowerCase() === label.toLowerCase());
+
+    for (const labelNode of candidates) {
+      let node = labelNode.parentElement;
+      for (let depth = 0; node && depth < 5; depth += 1, node = node.parentElement) {
+        const text = clean(node.innerText || node.textContent);
+        if (!text || text.length > 220) break;
+        const values = [...text.matchAll(/([+]?[\d][\d\s]*[.,]?\d{0,2})\s*(?:₽|руб\.?)/gi)]
+          .map((match) => normalizeMoney(match[1].replace('+', '')))
+          .filter(Boolean);
+        if (values.length === 1) return values[0];
+      }
+    }
+    return '';
   }
 
   function findReturnUrl(doc) {
@@ -674,10 +795,10 @@
     return {
       status: extractStatus(joined),
       orderDate: extractOrderDate(joined),
-      total: extractMoneyAfterLabel(clean(joined), ['Итого', 'Сумма заказа', 'Оплачено']),
-      goodsTotal: extractMoneyAfterLabel(clean(joined), ['Товары']),
-      bonusPayment: extractMoneyAfterLabel(clean(joined), ['Оплата баллами Ozon']),
-      deliveryTotal: extractMoneyAfterLabel(clean(joined), ['Доставка']),
+      total: extractMoneyAfterLabel(joined, ['Итого', 'Сумма заказа', 'Оплачено']),
+      goodsTotal: extractMoneyAfterLabel(joined, ['Товары']),
+      bonusPayment: extractMoneyAfterLabel(joined, ['Оплата баллами Ozon']),
+      deliveryTotal: extractMoneyAfterLabel(joined, ['Доставка']),
       products: uniqueBy(products, (product) => `${product.productUrl}|${product.product}|${product.price}`)
     };
   }
@@ -1222,17 +1343,39 @@
   }
 
   function extractBestPrice(text) {
-    const multiplied = String(text).match(/(?:^|\s)\d+\s*[×xх]\s*(\d[\d\s]*[.,]?\d{0,2})\s*(?:₽|руб\.?)/i);
+    const source = String(text || '').replace(/\u00a0|\u202f/g, ' ');
+    const multiplied = source.match(/(?:^|\s)\d+\s*[×xх]\s*(\d[\d\s]*[.,]?\d{0,2})\s*(?:₽|руб\.?)/i);
     if (multiplied) return normalizeMoney(multiplied[1]);
-    const values = [...text.matchAll(/(?:^|\s)(\d[\d\s]*[.,]?\d{0,2})\s*(?:₽|руб\.?)/gi)]
-      .map((match) => normalizeMoney(match[1]));
+    const values = [...source.matchAll(/(?:^|\s)(\d[\d\s]*[.,]?\d{0,2})\s*(?:₽|руб\.?)/gi)]
+      .map((match) => normalizeMoney(match[1]))
+      .filter(Boolean);
+    if (values.length === 2) {
+      const first = Number(values[0]);
+      const second = Number(values[1]);
+      if (Number.isFinite(first) && Number.isFinite(second) && second > 0 && first > second) {
+        const ratio = first / second;
+        const rounded = Math.round(ratio);
+        if (rounded >= 2 && rounded <= 100 && Math.abs(ratio - rounded) < 0.01) return values[1];
+      }
+    }
     return values[0] || '';
   }
 
   function extractMoneyAfterLabel(text, labels) {
+    const source = String(text || '').replace(/\u00a0|\u202f/g, ' ');
     for (const label of labels) {
-      const match = text.match(new RegExp(`${label}[^\\d]{0,30}(\\d[\\d\\s]*[.,]?\\d{0,2})\\s*(?:₽|руб\\.?)`, 'i'));
-      if (match) return normalizeMoney(match[1]);
+      const escaped = label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const exactLine = source.match(new RegExp(
+        `(?:^|\\n)\\s*${escaped}\\s*[:—-]?\\s*(?:\\n\\s*)?([+]?\\d[\\d\\s]*[.,]?\\d{0,2})\\s*(?:₽|руб\\.?)`,
+        'im'
+      ));
+      if (exactLine) return normalizeMoney(exactLine[1].replace('+', ''));
+
+      const fallback = source.match(new RegExp(
+        `(?:^|\\n)\\s*${escaped}[^\\d\\n]{0,30}([+]?\\d[\\d\\s]*[.,]?\\d{0,2})\\s*(?:₽|руб\\.?)`,
+        'im'
+      ));
+      if (fallback) return normalizeMoney(fallback[1].replace('+', ''));
     }
     return '';
   }
@@ -1263,22 +1406,32 @@
       'Количество': data.quantity || '',
       'Цена товара': data.price || '',
       'Реальная цена': data.realPrice || data.price || '',
+      'Реальная цена товара всего': calculateRealLineTotal(data),
       'Сумма заказа': data.total || '',
       'Ссылка на товар': data.productUrl || '',
       'Ссылка на заказ': data.orderUrl || ''
     };
   }
 
+  function calculateRealLineTotal(data) {
+    const quantity = Math.max(1, Number.parseInt(data.quantity, 10) || 1);
+    const realPrice = Number(String(data.realPrice || data.price || '').replace(',', '.'));
+    if (!Number.isFinite(realPrice)) return '';
+    return (realPrice * quantity).toFixed(2);
+  }
+
   function makeCsv(rows, options = {}, summary = {}) {
     const columns = CSV_COLUMNS;
+    const singleOrderMode = Boolean(options.specificOrder);
     const parameterLines = [
       ['Параметры выгрузки', ''],
       ['Версия приложения', chrome.runtime.getManifest().version],
       ['Сформировано', new Date().toLocaleString('ru-RU')],
-      ['Дата от', options.dateFrom || 'не указана'],
-      ['Дата до', options.dateTo || 'не указана'],
-      ['Автозагрузка истории', options.autoScroll ? 'Да' : 'Нет'],
-      ['Максимум прокруток списка', options.maxScrolls || ''],
+      ['Конкретный заказ', options.specificOrder || 'не указан'],
+      ['Дата от', singleOrderMode ? 'не применяется' : (options.dateFrom || 'не указана')],
+      ['Дата до', singleOrderMode ? 'не применяется' : (options.dateTo || 'не указана')],
+      ['Автозагрузка истории', singleOrderMode ? 'Нет — конкретный заказ' : (options.autoScroll ? 'Да' : 'Нет')],
+      ['Максимум прокруток списка', singleOrderMode ? 'не применяется' : (options.maxScrolls || '')],
       ['Режим вкладок', options.showTabs ? 'Активные, по одной' : 'Неактивные, до двух'],
       ['Использовать кэш', options.useCache === false ? 'Нет — перечитать и обновить' : 'Да'],
       ['Включать товары с возвратом', options.includeReturned ? 'Да' : 'Нет'],
@@ -1300,7 +1453,7 @@
   }
 
   function formatCsvValue(column, value) {
-    if (!['Цена товара', 'Реальная цена', 'Сумма заказа'].includes(column)) return value ?? '';
+    if (!['Цена товара', 'Реальная цена', 'Реальная цена товара всего', 'Сумма заказа'].includes(column)) return value ?? '';
     return String(value ?? '').replace('.', ',');
   }
 
@@ -1310,12 +1463,18 @@
 
   function buildExportFilename(options = {}, partial = false) {
     const today = new Date().toISOString().slice(0, 10);
-    const from = filenameDate(options.dateFrom, 'начало');
-    const to = filenameDate(options.dateTo, today);
     const now = new Date();
     const time = [now.getHours(), now.getMinutes(), now.getSeconds()]
       .map((value) => String(value).padStart(2, '0')).join('-');
     const version = chrome.runtime.getManifest().version;
+
+    if (options.specificOrder) {
+      const safeOrder = String(options.specificOrder).replace(/[^\d-]/g, '') || 'unknown';
+      return `ozon_order${partial ? '_partial' : ''}_${safeOrder}_${today}_${time} (v${version}).csv`;
+    }
+
+    const from = filenameDate(options.dateFrom, 'начало');
+    const to = filenameDate(options.dateTo, today);
     return `ozon_orders${partial ? '_partial' : ''}_${from}_${to}_${time} (v${version}).csv`;
   }
 
@@ -1335,15 +1494,22 @@
   }
 
   function downloadBlob(blob, filename) {
-    const url = URL.createObjectURL(blob);
-    const anchor = document.createElement('a');
-    anchor.href = url;
-    anchor.download = filename;
-    anchor.style.display = 'none';
-    document.body.appendChild(anchor);
-    anchor.click();
-    anchor.remove();
-    setTimeout(() => URL.revokeObjectURL(url), 30000);
+    const reader = new FileReader();
+    reader.onload = () => {
+      chrome.runtime.sendMessage({
+        type: 'OZON_DOWNLOAD_DATA_URL',
+        dataUrl: reader.result,
+        filename
+      }).then((response) => {
+        if (!response?.ok) throw new Error(response?.error || 'Chrome не запустил скачивание');
+      }).catch((error) => {
+        console.error('[OzonMyOrders2csv] Ошибка скачивания через chrome.downloads:', error);
+      });
+    };
+    reader.onerror = () => {
+      console.error('[OzonMyOrders2csv] Не удалось подготовить файл для скачивания');
+    };
+    reader.readAsDataURL(blob);
   }
 
   function startDiagnostics(options) {
@@ -1357,6 +1523,8 @@
         dateTo: options.dateTo || '',
         autoScroll: Boolean(options.autoScroll),
         maxScrolls: options.maxScrolls || '',
+        specificOrder: options.specificOrder || '',
+        specificOrderUrl: options.specificOrderUrl || '',
         showTabs: Boolean(options.showTabs),
         useCache: options.useCache !== false,
         includeReturned: Boolean(options.includeReturned)
@@ -1443,9 +1611,11 @@
             cacheWrites: summary.cacheWrites ?? '',
             stopReason: `Остановлено пользователем: ${stage}`
           }), buildExportFilename(diagnostics?.options || {}, true));
-          const from = filenameDate(diagnostics?.options?.dateFrom, 'начало');
-          const to = filenameDate(diagnostics?.options?.dateTo, day);
-          downloadJson(buildDiagnosticReport(rows, stage, decision), `ozon_export_report_${from}_${to}.json`);
+          const reportOptions = diagnostics?.options || {};
+          const reportName = reportOptions.specificOrder
+            ? `ozon_export_report_order_${String(reportOptions.specificOrder).replace(/[^\d-]/g, '') || 'unknown'}.json`
+            : `ozon_export_report_${filenameDate(reportOptions.dateFrom, 'начало')}_${filenameDate(reportOptions.dateTo, day)}.json`;
+          downloadJson(buildDiagnosticReport(rows, stage, decision), reportName);
         }
         actions.hidden = true;
         stop.style.display = '';

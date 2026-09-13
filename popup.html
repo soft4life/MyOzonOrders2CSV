@@ -9,7 +9,7 @@
 <body>
   <main>
     <h1>OzonMyOrders2csv <span id="version" class="version"></span></h1>
-    <p class="hint">Откройте раздел Ozon «Заказы» и не закрывайте его до завершения.</p>
+    <p class="hint">Для периода откройте Ozon «Заказы». Для одного заказа укажите его номер или ссылку.</p>
 
     <div class="settings-grid">
       <section class="settings-column" aria-labelledby="exportSettingsTitle">
@@ -24,6 +24,11 @@
             <input id="dateTo" type="date">
           </label>
         </div>
+        <label>
+          Конкретный заказ
+          <input id="specificOrder" type="text" inputmode="text" placeholder="34475857-0960 или ссылка Ozon">
+          <span class="field-note">Если заполнено, даты и прокрутка списка не используются.</span>
+        </label>
         <label class="check">
           <input id="autoScroll" type="checkbox" checked>
           Автоматически загрузить старые заказы

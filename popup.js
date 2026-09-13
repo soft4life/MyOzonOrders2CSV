@@ -8,10 +8,11 @@ const includeReturned = document.querySelector('#includeReturned');
 const useCache = document.querySelector('#useCache');
 const dateFrom = document.querySelector('#dateFrom');
 const dateTo = document.querySelector('#dateTo');
+const specificOrder = document.querySelector('#specificOrder');
 const cacheInfo = document.querySelector('#cacheInfo');
 const downloadCache = document.querySelector('#downloadCache');
 const clearCache = document.querySelector('#clearCache');
-const CACHE_PREFIX = 'obo-order-cache-v2:';
+const CACHE_PREFIX = 'obo-order-cache-v3:';
 document.querySelector('#version').textContent = `v${chrome.runtime.getManifest().version}`;
 let monitorTimer = null;
 
@@ -50,18 +51,19 @@ downloadCache.addEventListener('click', async () => {
     if (!entries.length) throw new Error('Кэш пока пуст');
     const payload = {
       format: 'OzonMyOrders2csv order cache',
-      cacheSchema: 2,
+      cacheSchema: 3,
       extensionVersion: chrome.runtime.getManifest().version,
       exportedAt: new Date().toISOString(),
       orders: entries.map(([key, entry]) => ({ cacheKey: key, ...entry }))
     };
     const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
-    const anchor = document.createElement('a');
-    anchor.href = url;
-    anchor.download = cacheFilename();
-    anchor.click();
-    setTimeout(() => URL.revokeObjectURL(url), 30000);
+    const dataUrl = await blobToDataUrl(blob);
+    await chrome.downloads.download({
+      url: dataUrl,
+      filename: cacheFilename(),
+      saveAs: false,
+      conflictAction: 'uniquify'
+    });
     message.classList.remove('error');
     message.textContent = `Кэш скачан: ${entries.length} заказов.`;
   } catch (error) {
@@ -69,6 +71,15 @@ downloadCache.addEventListener('click', async () => {
     message.textContent = error.message;
   }
 });
+
+function blobToDataUrl(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () => reject(reader.error || new Error('Не удалось подготовить файл для скачивания'));
+    reader.readAsDataURL(blob);
+  });
+}
 
 clearCache.addEventListener('click', async () => {
   const entries = await getCacheEntries().catch(() => []);
@@ -123,17 +134,48 @@ useCache.addEventListener('change', saveSettings);
 restoreSettings().catch(() => {});
 refreshCacheInfo();
 
-function syncScrollLimit() {
-  maxScrolls.disabled = !autoScroll.checked;
+function syncExportMode() {
+  const singleOrderMode = Boolean(specificOrder.value.trim());
+  dateFrom.disabled = singleOrderMode;
+  dateTo.disabled = singleOrderMode;
+  autoScroll.disabled = singleOrderMode;
+  maxScrolls.disabled = singleOrderMode || !autoScroll.checked;
 }
 
-autoScroll.addEventListener('change', syncScrollLimit);
-syncScrollLimit();
+autoScroll.addEventListener('change', syncExportMode);
+specificOrder.addEventListener('input', syncExportMode);
+syncExportMode();
+
+function normalizeSpecificOrder(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return { orderNumber: '', orderUrl: '' };
+
+  if (/^[\d-]{6,}$/.test(raw)) {
+    return {
+      orderNumber: raw,
+      orderUrl: `https://www.ozon.ru/my/orderdetails/?order=${encodeURIComponent(raw)}`
+    };
+  }
+
+  try {
+    const url = new URL(raw);
+    if (!/(^|\.)ozon\.ru$/i.test(url.hostname)) throw new Error('not_ozon');
+    const orderNumber = url.searchParams.get('order') || url.searchParams.get('orderNumber') ||
+      url.searchParams.get('orderId') || url.pathname.match(/\/orderdetails\/(\d[\d-]{5,})/i)?.[1] || '';
+    if (!orderNumber || !/^[\d-]{6,}$/.test(orderNumber)) throw new Error('no_order');
+    return {
+      orderNumber,
+      orderUrl: `https://www.ozon.ru/my/orderdetails/?order=${encodeURIComponent(orderNumber)}`
+    };
+  } catch {
+    throw new Error('Укажите номер заказа Ozon, например 34475857-0960, или полную ссылку на заказ.');
+  }
+}
 
 async function getActiveOzonTab() {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   if (!tab?.id || !/^https:\/\/(www\.)?ozon\.ru\//i.test(tab.url || '')) {
-    throw new Error('Сначала откройте страницу заказов на ozon.ru');
+    throw new Error('Сначала откройте любую страницу ozon.ru');
   }
   return tab;
 }
@@ -168,13 +210,25 @@ function startMonitoring() {
 
 button.addEventListener('click', async () => {
   message.classList.remove('error');
-  if (dateFrom.value && dateTo.value && dateFrom.value > dateTo.value) {
+
+  let singleOrder = { orderNumber: '', orderUrl: '' };
+  try {
+    singleOrder = normalizeSpecificOrder(specificOrder.value);
+  } catch (error) {
+    message.classList.add('error');
+    message.textContent = error.message;
+    return;
+  }
+
+  if (!singleOrder.orderNumber && dateFrom.value && dateTo.value && dateFrom.value > dateTo.value) {
     message.classList.add('error');
     message.textContent = 'Дата «от» не может быть позже даты «до».';
     return;
   }
 
-  message.textContent = 'Запускаю выгрузку…';
+  message.textContent = singleOrder.orderNumber
+    ? `Запускаю выгрузку заказа ${singleOrder.orderNumber}…`
+    : 'Запускаю выгрузку…';
   setRunningUi(true);
 
   try {
@@ -185,10 +239,12 @@ button.addEventListener('click', async () => {
     const response = await chrome.tabs.sendMessage(tab.id, {
       type: 'OZON_EXPORT_ORDERS',
       options: {
-        dateFrom: dateFrom.value,
-        dateTo: dateTo.value,
-        autoScroll: autoScroll.checked,
-        maxScrolls: scrollLimit,
+        dateFrom: singleOrder.orderNumber ? '' : dateFrom.value,
+        dateTo: singleOrder.orderNumber ? '' : dateTo.value,
+        autoScroll: singleOrder.orderNumber ? false : autoScroll.checked,
+        maxScrolls: singleOrder.orderNumber ? '' : scrollLimit,
+        specificOrder: singleOrder.orderNumber,
+        specificOrderUrl: singleOrder.orderUrl,
         showTabs: showTabs.checked,
         includeReturned: includeReturned.checked,
         useCache: useCache.checked
@@ -196,7 +252,9 @@ button.addEventListener('click', async () => {
     });
 
     if (!response?.ok) throw new Error(response?.error || 'Не удалось запустить экспорт');
-    message.textContent = 'Экспорт запущен. Не закрывайте вкладку со списком заказов до завершения.';
+    message.textContent = singleOrder.orderNumber
+      ? `Экспорт заказа ${singleOrder.orderNumber} запущен.`
+      : 'Экспорт запущен. Не закрывайте вкладку со списком заказов до завершения.';
     startMonitoring();
   } catch (error) {
     message.classList.add('error');

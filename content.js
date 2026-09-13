@@ -84,7 +84,6 @@
           dateFrom: '',
           dateTo: '',
           autoScroll: false,
-          maxScrolls: '',
           specificOrder: singleOrder.orderNumber,
           specificOrderUrl: singleOrder.orderUrl
         }
@@ -96,7 +95,6 @@
         dateFrom: '',
         dateTo: '',
         autoScroll: false,
-        maxScrolls: '',
         specificOrder: singleOrder.orderNumber,
         specificOrderUrl: singleOrder.orderUrl
       };
@@ -127,7 +125,6 @@
           orderKeys: [singleOrder.orderNumber],
           earliestDate: '',
           earliestReceiptDate: '',
-          scrollLimitReached: false,
           stoppedByReceiptDate: false,
           singleOrder: true
         }
@@ -140,7 +137,6 @@
       orderKeys: captured.orderKeys.length,
       earliestDate: captured.earliestDate || '',
       earliestReceiptDate: captured.earliestReceiptDate || '',
-      scrollLimitReached: Boolean(captured.scrollLimitReached),
       stoppedByReceiptDate: Boolean(captured.stoppedByReceiptDate),
       specificOrder: singleOrder.orderNumber || ''
     });
@@ -187,9 +183,7 @@
       ? `Обработан конкретный заказ ${singleOrder.orderNumber}.`
       : (captured.stoppedByReceiptDate
         ? 'Диапазон просмотрен полностью: в списке начались товары, полученные раньше даты «от». Ничего исправлять не нужно.'
-        : (captured.scrollLimitReached
-          ? 'Достигнут лимит прокруток. Если нужные заказы не попали в файл, увеличьте лимит до 100 и повторите выгрузку.'
-          : 'Достигнут конец списка заказов. Ничего исправлять не нужно.'));
+        : (runOptions.autoScroll ? 'Достигнут конец списка заказов.' : 'Обработаны загруженные заказы; автозагрузка выключена.'));
 
     const csv = makeCsv(result.rows, runOptions, {
       orders: result.orders,
@@ -202,13 +196,10 @@
     });
     await downloadCsv(csv, buildExportFilename(runOptions));
 
-    const limitedBeforeRange = !singleOrderMode && captured.scrollLimitReached && runOptions.dateFrom &&
-      (!captured.earliestDate || captured.earliestDate > runOptions.dateFrom);
     updateOverlay(
       singleOrderMode
         ? `Готово: заказ ${singleOrder.orderNumber}, ${result.rows.length} строк, из кэша: ${result.cacheHits}, сохранено в кэш: ${result.cacheWrites}, исключено возвратов: ${result.excludedReturns}. CSV скачан.`
-        : (`Готово: ${result.orders} заказов, ${result.rows.length} строк, из кэша: ${result.cacheHits}, сохранено в кэш: ${result.cacheWrites}, исключено возвратов: ${result.excludedReturns}. CSV скачан.` +
-          (limitedBeforeRange ? ' Достигнут лимит прокруток раньше даты «от» — для полного периода увеличьте его.' : ''))
+        : `Готово: ${result.orders} заказов, ${result.rows.length} строк, из кэша: ${result.cacheHits}, сохранено в кэш: ${result.cacheWrites}, исключено возвратов: ${result.excludedReturns}. CSV скачан.`
     );
   }
 
@@ -256,7 +247,7 @@
     const totalEntries = entries.length;
 
     // Ozon mixes dates in the order list, so every loaded non-cancelled card must
-    // be checked. The user-controlled scroll limit bounds the size of this set.
+    // be checked within the history loaded up to the date boundary or list end.
     const detailConcurrency = options.showTabs ? 1 : 2;
     await mapWithLimit(entries, detailConcurrency, async ([key, rows]) => {
       if (stopRequested) return;
@@ -391,6 +382,11 @@
       if (entry?.schema !== ORDER_CACHE_SCHEMA || !entry.detail?.products?.length || !entry.detail?.returnCheck?.cacheable) {
         return null;
       }
+      // Reject suspicious cached prices instead of reusing a merged seller number.
+      const total = Number(entry.detail.goodsTotal || entry.detail.total);
+      if (total > 0 && entry.detail.products.some((product) => Number(product.price) > total)) {
+        return null;
+      }
       return entry.detail;
     } catch (error) {
       addDiagnostic('warning', 'Не удалось прочитать кэш заказа', { error: error.message });
@@ -522,6 +518,9 @@
 
     const scrolling = document.scrollingElement || document.documentElement;
     let previousTop = -1;
+    let previousHeight = -1;
+    let previousOrderCount = -1;
+    const seenOrderKeys = new Set();
     let stableRounds = 0;
     const snapshots = [];
 
@@ -924,18 +923,21 @@
     return false;
   }
 
+  function recommendationMarkers(root) {
+    return [...(root.querySelectorAll?.('h1,h2,h3,h4,div,span,p,[role="heading"]') || [])]
+      .filter((node) => isRecommendationText(node.textContent));
+  }
+
   function nodeContainsRecommendationHeading(node) {
-    return [...(node.querySelectorAll?.('h1,h2,h3,h4') || [])]
-      .some((heading) => isRecommendationText(heading.textContent));
+    return recommendationMarkers(node).length > 0;
   }
 
   function findRecommendationHeading(doc) {
-    return [...doc.querySelectorAll('h1,h2,h3,h4')]
-      .find((heading) => isRecommendationText(heading.textContent)) || null;
+    return recommendationMarkers(doc)[0] || null;
   }
 
   function isRecommendationText(value) {
-    return /рекомендации(?:\s+к\s+вашим\s+покупкам)?|подобрали\s+по\s+вашим\s+интересам/i.test(clean(value));
+    return /^(?:рекомендации(?:\s+к\s+вашим\s+покупкам)?|подобрали\s+по\s+вашим\s+интересам|рекомендуем(?:\s+вам)?|вам\s+может\s+понравиться|с\s+этим\s+товаром\s+покупают|также\s+покупают|вы\s+недавно\s+смотрели)[.!:]?$/i.test(clean(value));
   }
 
   function isBeforeRecommendationBoundary(node, doc) {
@@ -1039,22 +1041,24 @@
   async function loadAllOrders(options) {
     let stableRounds = 0;
     let previousTop = -1;
+    let previousHeight = -1;
+    let previousOrderCount = -1;
+    const seenOrderKeys = new Set();
     const rows = [];
     const orderKeys = [];
-    const maxScrolls = Math.max(1, Math.min(100, Number.parseInt(options.maxScrolls, 10) || 5));
-    let scrollLimitReached = false;
     let stoppedByReceiptDate = false;
     let olderReceiptRounds = 0;
     const receiptDates = [];
 
     window.scrollTo({ top: 0, behavior: 'auto' });
-    await wait(600);
+    await wait(1500);
 
-    for (let round = 0; round <= maxScrolls && stableRounds < 2; round += 1) {
+    for (let round = 0; stableRounds < 6; round += 1) {
       if (stopRequested) break;
       const snapshot = collectOrders(options, true);
       rows.push(...snapshot.rows);
       orderKeys.push(...snapshot.orderKeys);
+      snapshot.orderKeys.forEach((key) => seenOrderKeys.add(key));
       receiptDates.push(...snapshot.receiptDates);
 
       const visibleReceiptDates = snapshot.receiptDates.filter(Boolean);
@@ -1071,29 +1075,32 @@
         break;
       }
 
-      if (round === maxScrolls) {
-        scrollLimitReached = true;
-        break;
-      }
 
       clickLoadMore();
       const scrolling = document.scrollingElement || document.documentElement;
       const viewportHeight = Math.max(window.innerHeight || 0, 600);
       window.scrollTo({
-        top: scrolling.scrollTop + Math.floor(viewportHeight * 0.82),
+        top: scrolling.scrollTop + Math.floor(viewportHeight * 0.55),
         behavior: 'auto'
       });
-      updateOverlay(`Загружаю историю заказов… прокрутка ${round + 1} из ${maxScrolls}`);
-      await wait(850);
+      updateOverlay(`Загружаю историю заказов… прокрутка ${round + 1}`);
+      // Give lazy-loaded cards time to render; keep Stop responsive.
+      for (let tick = 0; tick < 8 && !stopRequested; tick += 1) await wait(250);
 
       if (stopRequested) break;
 
-      if (hasReachedRecommendations()) break;
 
       const currentTop = scrolling.scrollTop;
-      if (currentTop === previousTop) stableRounds += 1;
+      const currentHeight = scrolling.scrollHeight;
+      if (currentTop === previousTop && currentHeight === previousHeight &&
+          seenOrderKeys.size === previousOrderCount) stableRounds += 1;
       else stableRounds = 0;
       previousTop = currentTop;
+      previousHeight = currentHeight;
+      previousOrderCount = seenOrderKeys.size;
+      if (stableRounds > 0) {
+        updateOverlay(`Ожидаю подгрузку заказов… проверка ${stableRounds} из 6, найдено ${seenOrderKeys.size}`);
+      }
     }
 
     const uniqueRows = uniqueBy(rows, (row) => JSON.stringify(row));
@@ -1104,14 +1111,8 @@
       orderKeys: [...new Set(orderKeys)],
       earliestDate: dates[0] || '',
       earliestReceiptDate: sortedReceiptDates[0] || '',
-      scrollLimitReached,
       stoppedByReceiptDate
     };
-  }
-
-  function hasReachedRecommendations() {
-    return [...document.querySelectorAll('h1,h2,h3')]
-      .some((node) => /подобрали\s+по\s+вашим\s+интересам/i.test(clean(node.textContent)));
   }
 
   function clickLoadMore() {
@@ -1345,7 +1346,7 @@
 
     // Ozon иногда визуально разрывает «2 × 55,10 ₽» на разные DOM-узлы.
     // В этом случае количество восстанавливается из суммы строки и цены единицы.
-    const moneyValues = [...source.matchAll(/(?:^|\s)(\d[\d\s]*[.,]?\d{0,2})\s*(?:₽|руб\.?)/gi)]
+    const moneyValues = [...source.matchAll(/(?:^|\s)(\d{1,3}(?:[ \u00a0\u202f]\d{3})+(?:[.,]\d{1,2})?|\d+(?:[.,]\d{1,2})?)\s*(?:₽|руб\.?)/gi)]
       .map((match) => Number(normalizeMoney(match[1])))
       .filter((value) => Number.isFinite(value) && value > 0);
     if (moneyValues.length === 2 && moneyValues[0] > moneyValues[1]) {
@@ -1358,9 +1359,9 @@
 
   function extractBestPrice(text) {
     const source = String(text || '').replace(/\u00a0|\u202f/g, ' ');
-    const multiplied = source.match(/(?:^|\s)\d+\s*[×xх]\s*(\d[\d\s]*[.,]?\d{0,2})\s*(?:₽|руб\.?)/i);
+    const multiplied = source.match(/(?:^|\s)\d+\s*[×xх]\s*(\d{1,3}(?:[ \u00a0\u202f]\d{3})+(?:[.,]\d{1,2})?|\d+(?:[.,]\d{1,2})?)\s*(?:₽|руб\.?)/i);
     if (multiplied) return normalizeMoney(multiplied[1]);
-    const values = [...source.matchAll(/(?:^|\s)(\d[\d\s]*[.,]?\d{0,2})\s*(?:₽|руб\.?)/gi)]
+    const values = [...source.matchAll(/(?:^|\s)(\d{1,3}(?:[ \u00a0\u202f]\d{3})+(?:[.,]\d{1,2})?|\d+(?:[.,]\d{1,2})?)\s*(?:₽|руб\.?)/gi)]
       .map((match) => normalizeMoney(match[1]))
       .filter(Boolean);
     if (values.length === 2) {
@@ -1445,7 +1446,6 @@
       ['Дата от', singleOrderMode ? 'не применяется' : (options.dateFrom || 'не указана')],
       ['Дата до', singleOrderMode ? 'не применяется' : (options.dateTo || 'не указана')],
       ['Автозагрузка истории', singleOrderMode ? 'Нет — конкретный заказ' : (options.autoScroll ? 'Да' : 'Нет')],
-      ['Максимум прокруток списка', singleOrderMode ? 'не применяется' : (options.maxScrolls || '')],
       ['Режим вкладок', options.showTabs ? 'Активные, по одной' : 'Неактивные, до двух'],
       ['Использовать кэш', options.useCache === false ? 'Нет — перечитать и обновить' : 'Да'],
       ['Включать товары с возвратом', options.includeReturned ? 'Да' : 'Нет'],
@@ -1531,7 +1531,6 @@
         dateFrom: options.dateFrom || '',
         dateTo: options.dateTo || '',
         autoScroll: Boolean(options.autoScroll),
-        maxScrolls: options.maxScrolls || '',
         specificOrder: options.specificOrder || '',
         specificOrderUrl: options.specificOrderUrl || '',
         showTabs: Boolean(options.showTabs),

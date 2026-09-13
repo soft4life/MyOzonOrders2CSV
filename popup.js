@@ -2,7 +2,6 @@ const button = document.querySelector('#exportButton');
 const stopButton = document.querySelector('#stopButton');
 const message = document.querySelector('#message');
 const autoScroll = document.querySelector('#autoScroll');
-const maxScrolls = document.querySelector('#maxScrolls');
 const showTabs = document.querySelector('#showTabs');
 const includeReturned = document.querySelector('#includeReturned');
 const useCache = document.querySelector('#useCache');
@@ -175,7 +174,6 @@ function syncExportMode() {
   dateFrom.disabled = singleOrderMode;
   dateTo.disabled = singleOrderMode;
   autoScroll.disabled = singleOrderMode;
-  maxScrolls.disabled = singleOrderMode || !autoScroll.checked;
 }
 
 autoScroll.addEventListener('change', syncExportMode);
@@ -269,8 +267,6 @@ button.addEventListener('click', async () => {
 
   try {
     await saveSettings();
-    const scrollLimit = Math.max(1, Math.min(100, Number.parseInt(maxScrolls.value, 10) || 5));
-    maxScrolls.value = String(scrollLimit);
     const tab = await getActiveOzonTab();
     const response = await chrome.tabs.sendMessage(tab.id, {
       type: 'OZON_EXPORT_ORDERS',
@@ -278,7 +274,6 @@ button.addEventListener('click', async () => {
         dateFrom: singleOrder.orderNumber ? '' : dateFrom.value,
         dateTo: singleOrder.orderNumber ? '' : dateTo.value,
         autoScroll: singleOrder.orderNumber ? false : autoScroll.checked,
-        maxScrolls: singleOrder.orderNumber ? '' : scrollLimit,
         specificOrder: singleOrder.orderNumber,
         specificOrderUrl: singleOrder.orderUrl,
         showTabs: showTabs.checked,

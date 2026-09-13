@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>OzonMyOrders2csv</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <main>
+    <h1>OzonMyOrders2csv <span id="version" class="version"></span></h1>
+    <p class="hint">Откройте раздел Ozon «Заказы» и не закрывайте его до завершения.</p>
+
+    <div class="settings-grid">
+      <section class="settings-column" aria-labelledby="exportSettingsTitle">
+        <h2 id="exportSettingsTitle">Параметры выгрузки</h2>
+        <div class="date-grid">
+          <label>
+            Дата от
+            <input id="dateFrom" type="date">
+          </label>
+          <label>
+            Дата до
+            <input id="dateTo" type="date">
+          </label>
+        </div>
+        <label class="check">
+          <input id="autoScroll" type="checkbox" checked>
+          Автоматически загрузить старые заказы
+        </label>
+        <label id="maxScrollsLabel">
+          Максимум прокруток
+          <input id="maxScrolls" type="number" min="1" max="100" step="1" value="100">
+          <span class="field-note">Для списка: 1–3 — тест, 100 — полный период.</span>
+        </label>
+      </section>
+
+      <section class="settings-column" aria-labelledby="generalSettingsTitle">
+        <h2 id="generalSettingsTitle">Настройки</h2>
+        <p class="rule">Отменённые исключаются. Возвращённые по умолчанию не выгружаются.</p>
+        <label class="check observer-option">
+          <input id="includeReturned" type="checkbox">
+          <span class="check-copy">
+            Включать товары с заявкой на возврат
+            <span class="field-note">Останутся в CSV со статусом.</span>
+          </span>
+        </label>
+        <label class="check observer-option">
+          <input id="showTabs" type="checkbox">
+          <span class="check-copy">
+            Показывать вкладки при обработке
+            <span class="field-note">Для визуальной проверки.</span>
+          </span>
+        </label>
+        <label class="check observer-option cache-option">
+          <input id="useCache" type="checkbox" checked>
+          <span class="check-copy">
+            Использовать кэш
+            <span class="field-note">Если снять — перечитать Ozon и обновить кэш.</span>
+          </span>
+        </label>
+
+        <section class="cache-panel" aria-labelledby="cacheTitle">
+          <div id="cacheTitle" class="cache-title">Кэш закрытых заказов</div>
+          <div id="cacheInfo" class="cache-info">Проверяю кэш…</div>
+          <div class="cache-actions">
+            <button id="downloadCache" class="cache-download" type="button">Скачать JSON</button>
+            <button id="clearCache" class="cache-clear" type="button">Очистить</button>
+          </div>
+        </section>
+      </section>
+    </div>
+
+    <div class="actions">
+      <button id="exportButton" type="button">Выгрузить в CSV</button>
+      <button id="stopButton" class="stop" type="button">Стоп</button>
+    </div>
+    <p id="message" class="message" aria-live="polite"></p>
+    <p class="privacy">Файл создаётся локально; данные аккаунта никуда не отправляются.</p>
+  </main>
+  <script src="popup.js"></script>
+</body>
+</html>

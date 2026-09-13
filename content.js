@@ -1,6 +1,6 @@
 (() => {
   const OVERLAY_ID = 'obo-export-overlay';
-  const ORDER_CACHE_SCHEMA = 3;
+  const ORDER_CACHE_SCHEMA = 4;
   const ORDER_CACHE_PREFIX = `obo-order-cache-v${ORDER_CACHE_SCHEMA}:`;
   const CSV_COLUMNS = [
     'Дата заказа', 'Год', 'Месяц', 'Номер заказа', 'Статус', 'Статус возврата', 'Товар', 'Количество',
@@ -200,7 +200,7 @@
       cacheWrites: result.cacheWrites,
       stopReason
     });
-    downloadCsv(csv, buildExportFilename(runOptions));
+    await downloadCsv(csv, buildExportFilename(runOptions));
 
     const limitedBeforeRange = !singleOrderMode && captured.scrollLimitReached && runOptions.dateFrom &&
       (!captured.earliestDate || captured.earliestDate > runOptions.dateFrom);
@@ -288,7 +288,7 @@
         }
         detail = url ? await fetchOrderDetail(url, options) : null;
         if (detail?.returnCheck?.cacheable && detail.products?.length) {
-          const saved = await writeCachedOrder(base, detail);
+          const saved = await writeCachedOrder(base, detail, options);
           if (saved) cacheWrites += 1;
         }
       }
@@ -398,7 +398,12 @@
     }
   }
 
-  async function writeCachedOrder(base, detail) {
+  async function writeCachedOrder(base, detail, options = {}) {
+    // Only a confirmed order date may authorize overwriting cache within a period.
+    const orderDate = detail?.orderDate || '';
+    if ((options.dateFrom || options.dateTo) && !orderDate) return false;
+    if ((options.dateFrom && orderDate < options.dateFrom) ||
+        (options.dateTo && orderDate > options.dateTo)) return false;
     const key = orderCacheKey(base);
     if (!key) return false;
     try {
@@ -607,6 +612,7 @@
 
   function extractMoneyNearExactLabel(doc, label) {
     if (!doc?.querySelectorAll) return '';
+    const summaryLabels = ['Товары', 'Доставка', 'Оплата баллами Ozon', 'Оплачено', 'Итого'];
     const candidates = [...doc.querySelectorAll('div,span,p')]
       .filter((node) => clean(node.textContent).toLowerCase() === label.toLowerCase());
 
@@ -615,6 +621,14 @@
       for (let depth = 0; node && depth < 5; depth += 1, node = node.parentElement) {
         const text = clean(node.innerText || node.textContent);
         if (!text || text.length > 220) break;
+        // Never borrow an amount from another summary row (e.g. goods for free delivery).
+        const otherLabel = [...node.querySelectorAll('div,span,p')].some((child) => {
+          const value = clean(child.textContent).toLowerCase();
+          return summaryLabels.some((known) => known.toLowerCase() !== label.toLowerCase() &&
+            value === known.toLowerCase());
+        });
+        if (otherLabel) break;
+        if (label === 'Доставка' && /бесплатно|без оплаты/i.test(text)) return '0.00';
         const values = [...text.matchAll(/([+]?[\d][\d\s]*[.,]?\d{0,2})\s*(?:₽|руб\.?)/gi)]
           .map((match) => normalizeMoney(match[1].replace('+', '')))
           .filter(Boolean);
@@ -1485,31 +1499,26 @@
 
   function downloadCsv(csv, filename = `ozon_orders_${new Date().toISOString().slice(0, 10)}.csv`) {
     const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
-    downloadBlob(blob, filename);
+    return downloadBlob(blob, filename);
   }
 
   function downloadJson(value, filename) {
     const blob = new Blob([JSON.stringify(value, null, 2)], { type: 'application/json;charset=utf-8' });
-    downloadBlob(blob, filename);
+    return downloadBlob(blob, filename);
   }
 
-  function downloadBlob(blob, filename) {
-    const reader = new FileReader();
-    reader.onload = () => {
-      chrome.runtime.sendMessage({
-        type: 'OZON_DOWNLOAD_DATA_URL',
-        dataUrl: reader.result,
-        filename
-      }).then((response) => {
-        if (!response?.ok) throw new Error(response?.error || 'Chrome не запустил скачивание');
-      }).catch((error) => {
-        console.error('[OzonMyOrders2csv] Ошибка скачивания через chrome.downloads:', error);
-      });
-    };
-    reader.onerror = () => {
-      console.error('[OzonMyOrders2csv] Не удалось подготовить файл для скачивания');
-    };
-    reader.readAsDataURL(blob);
+  async function downloadBlob(blob, filename) {
+    const dataUrl = await new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result);
+      reader.onerror = () => reject(new Error('Не удалось подготовить файл для скачивания'));
+      reader.readAsDataURL(blob);
+    });
+    const response = await chrome.runtime.sendMessage({
+      type: 'OZON_DOWNLOAD_DATA_URL', dataUrl, filename
+    });
+    if (!response?.ok) throw new Error(response?.error || 'Не удалось сохранить файл');
+    return response.downloadId;
   }
 
   function startDiagnostics(options) {
@@ -1593,7 +1602,9 @@
       stop.style.display = 'none';
       actions.hidden = false;
 
-      const finish = (download) => {
+      const finish = async (download) => {
+        actions.hidden = true;
+        try {
         const day = new Date().toISOString().slice(0, 10);
         const decision = download ? 'download' : 'discard';
         addDiagnostic('info', download ? 'Пользователь выбрал скачивание' : 'Пользователь отказался от скачивания');
@@ -1602,7 +1613,7 @@
           const partialReturnedQuantity = rows
             .filter((row) => /заявка\s+на\s+возврат|частичный\s+возврат/i.test(row['Статус возврата'] || ''))
             .reduce((sum, row) => sum + (Number.parseInt(row['Количество'], 10) || 1), 0);
-          downloadCsv(makeCsv(rows, diagnostics?.options || {}, {
+          await downloadCsv(makeCsv(rows, diagnostics?.options || {}, {
             orders: partialOrders,
             rows: rows.length,
             returnedQuantity: summary.returnedQuantity ?? partialReturnedQuantity,
@@ -1615,7 +1626,7 @@
           const reportName = reportOptions.specificOrder
             ? `ozon_export_report_order_${String(reportOptions.specificOrder).replace(/[^\d-]/g, '') || 'unknown'}.json`
             : `ozon_export_report_${filenameDate(reportOptions.dateFrom, 'начало')}_${filenameDate(reportOptions.dateTo, day)}.json`;
-          downloadJson(buildDiagnosticReport(rows, stage, decision), reportName);
+          await downloadJson(buildDiagnosticReport(rows, stage, decision), reportName);
         }
         actions.hidden = true;
         stop.style.display = '';
@@ -1623,6 +1634,11 @@
           ? `Выгрузка остановлена. Скачаны частичный CSV (${rows.length} строк) и отчёт.`
           : 'Выгрузка остановлена. Файлы не созданы.');
         resolve();
+        } catch (error) {
+          updateOverlay(`Не удалось сохранить файлы: ${error.message}`, true);
+          actions.hidden = false;
+          stop.style.display = 'none';
+        }
       };
 
       actions.querySelector('[data-download-partial]').onclick = () => finish(true);

@@ -157,10 +157,27 @@ async function downloadDataUrl(dataUrl, filename) {
     .replace(/[\\/:*?"<>|]/g, '_')
     .replace(/\s+/g, ' ')
     .trim();
-  return chrome.downloads.download({
+  const downloadId = await chrome.downloads.download({
     url: dataUrl,
     filename: safeFilename || 'ozon_export.csv',
-    saveAs: false,
+    saveAs: true,
     conflictAction: 'uniquify'
   });
+  // download() only confirms that Chrome started the download.
+  const deadline = Date.now() + 5 * 60 * 1000;
+  while (Date.now() < deadline) {
+    const [item] = await chrome.downloads.search({ id: downloadId });
+    if (!item) throw new Error('Chrome не нашёл загружаемый файл');
+    if (item.state === 'complete') return downloadId;
+    if (item.state === 'interrupted') {
+      const reason = item.error || 'UNKNOWN';
+      if (reason === 'FILE_ACCESS_DENIED') {
+        throw new Error('Нет разрешения на запись в выбранную папку. Повторите сохранение и выберите другую папку.');
+      }
+      if (reason === 'USER_CANCELED') throw new Error('Сохранение отменено');
+      throw new Error(`Chrome не сохранил файл: ${reason}`);
+    }
+    await wait(500);
+  }
+  throw new Error('Chrome не подтвердил сохранение за 5 минут. Проверьте список загрузок.');
 }

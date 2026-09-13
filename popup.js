@@ -8,11 +8,13 @@ const includeReturned = document.querySelector('#includeReturned');
 const useCache = document.querySelector('#useCache');
 const dateFrom = document.querySelector('#dateFrom');
 const dateTo = document.querySelector('#dateTo');
+const periodPreset = document.querySelector('#periodPreset');
+const presetYear = document.querySelector('#presetYear');
 const specificOrder = document.querySelector('#specificOrder');
 const cacheInfo = document.querySelector('#cacheInfo');
 const downloadCache = document.querySelector('#downloadCache');
 const clearCache = document.querySelector('#clearCache');
-const CACHE_PREFIX = 'obo-order-cache-v3:';
+const CACHE_PREFIX = 'obo-order-cache-v4:';
 document.querySelector('#version').textContent = `v${chrome.runtime.getManifest().version}`;
 let monitorTimer = null;
 
@@ -51,19 +53,17 @@ downloadCache.addEventListener('click', async () => {
     if (!entries.length) throw new Error('Кэш пока пуст');
     const payload = {
       format: 'OzonMyOrders2csv order cache',
-      cacheSchema: 3,
+      cacheSchema: 4,
       extensionVersion: chrome.runtime.getManifest().version,
       exportedAt: new Date().toISOString(),
       orders: entries.map(([key, entry]) => ({ cacheKey: key, ...entry }))
     };
     const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json;charset=utf-8' });
     const dataUrl = await blobToDataUrl(blob);
-    await chrome.downloads.download({
-      url: dataUrl,
-      filename: cacheFilename(),
-      saveAs: false,
-      conflictAction: 'uniquify'
+    const response = await chrome.runtime.sendMessage({
+      type: 'OZON_DOWNLOAD_DATA_URL', dataUrl, filename: cacheFilename()
     });
+    if (!response?.ok) throw new Error(response?.error || 'Не удалось сохранить кэш');
     message.classList.remove('error');
     message.textContent = `Кэш скачан: ${entries.length} заказов.`;
   } catch (error) {
@@ -105,6 +105,35 @@ function localIsoDate(date = new Date()) {
   ].join('-');
 }
 
+// Years are generated at opening so the list stays current.
+for (let year = new Date().getFullYear(); year >= 1998; year -= 1) {
+  const option = document.createElement('option');
+  option.value = String(year);
+  option.textContent = String(year);
+  presetYear.appendChild(option);
+}
+
+function syncPeriodPreset() {
+  const year = dateFrom.value.slice(0, 4);
+  const fullYear = dateFrom.value === `${year}-01-01` && dateTo.value === `${year}-12-31` &&
+    [...presetYear.options].some((option) => option.value === year);
+  periodPreset.value = fullYear ? 'year' : 'custom';
+  if (fullYear) presetYear.value = year;
+  syncExportMode();
+}
+
+function applyPeriodPreset() {
+  if (periodPreset.value === 'year') {
+    dateFrom.value = `${presetYear.value}-01-01`;
+    dateTo.value = `${presetYear.value}-12-31`;
+  }
+  syncExportMode();
+  return saveSettings();
+}
+
+periodPreset.addEventListener('change', applyPeriodPreset);
+presetYear.addEventListener('change', applyPeriodPreset);
+
 if (!dateTo.value) dateTo.value = localIsoDate();
 
 async function restoreSettings() {
@@ -114,6 +143,7 @@ async function restoreSettings() {
   if (Object.prototype.hasOwnProperty.call(saved, 'showTabs')) showTabs.checked = Boolean(saved.showTabs);
   if (Object.prototype.hasOwnProperty.call(saved, 'includeReturned')) includeReturned.checked = Boolean(saved.includeReturned);
   if (Object.prototype.hasOwnProperty.call(saved, 'useCache')) useCache.checked = Boolean(saved.useCache);
+  syncPeriodPreset();
 }
 
 function saveSettings() {
@@ -126,8 +156,12 @@ function saveSettings() {
   });
 }
 
-dateFrom.addEventListener('change', saveSettings);
-dateTo.addEventListener('change', saveSettings);
+for (const field of [dateFrom, dateTo]) {
+  field.addEventListener('change', () => {
+    syncPeriodPreset();
+    saveSettings();
+  });
+}
 showTabs.addEventListener('change', saveSettings);
 includeReturned.addEventListener('change', saveSettings);
 useCache.addEventListener('change', saveSettings);
@@ -136,6 +170,8 @@ refreshCacheInfo();
 
 function syncExportMode() {
   const singleOrderMode = Boolean(specificOrder.value.trim());
+  periodPreset.disabled = singleOrderMode;
+  presetYear.disabled = singleOrderMode || periodPreset.value !== 'year';
   dateFrom.disabled = singleOrderMode;
   dateTo.disabled = singleOrderMode;
   autoScroll.disabled = singleOrderMode;

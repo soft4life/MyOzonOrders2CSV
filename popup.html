@@ -16,6 +16,19 @@
         <h2 id="exportSettingsTitle">Параметры выгрузки</h2>
         <div class="date-grid">
           <label>
+            Период
+            <select id="periodPreset">
+              <option value="custom">Свои даты</option>
+              <option value="year">Год</option>
+            </select>
+          </label>
+          <label>
+            Год
+            <select id="presetYear" disabled></select>
+          </label>
+        </div>
+        <div class="date-grid">
+          <label>
             Дата от
             <input id="dateFrom" type="date">
           </label>
@@ -61,7 +74,7 @@
           <input id="useCache" type="checkbox" checked>
           <span class="check-copy">
             Использовать кэш
-            <span class="field-note">Если снять — перечитать Ozon и обновить кэш.</span>
+            <span class="field-note">Если снять — обновить кэш выбранного периода. Остальные заказы сохраняются.</span>
           </span>
         </label>
 

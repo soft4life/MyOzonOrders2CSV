@@ -183,7 +183,7 @@
       ? `Обработан конкретный заказ ${singleOrder.orderNumber}.`
       : (captured.stoppedByReceiptDate
         ? 'Диапазон просмотрен полностью: в списке начались товары, полученные раньше даты «от». Ничего исправлять не нужно.'
-        : (runOptions.autoScroll ? 'Достигнут конец списка заказов.' : 'Обработаны загруженные заказы; автозагрузка выключена.'));
+        : (runOptions.autoScroll ? captured.completionReason : 'Обработаны загруженные заказы; автозагрузка выключена.'));
 
     const csv = makeCsv(result.rows, runOptions, {
       orders: result.orders,
@@ -522,6 +522,7 @@
     let previousOrderCount = -1;
     const seenOrderKeys = new Set();
     let stableRounds = 0;
+    let noMoreOrderRounds = 0;
     const snapshots = [];
 
     const capture = () => snapshots.push(parseDetailDocument(document));
@@ -1041,24 +1042,21 @@
   async function loadAllOrders(options) {
     let stableRounds = 0;
     let previousTop = -1;
-    let previousHeight = -1;
-    let previousOrderCount = -1;
-    const seenOrderKeys = new Set();
     const rows = [];
     const orderKeys = [];
+    let completionReason = 'Прокрутка перестала изменяться. Полнота периода не подтверждена.';
     let stoppedByReceiptDate = false;
     let olderReceiptRounds = 0;
     const receiptDates = [];
 
     window.scrollTo({ top: 0, behavior: 'auto' });
-    await wait(1500);
+    await wait(600);
 
-    for (let round = 0; stableRounds < 6; round += 1) {
+    for (let round = 0; stableRounds < 2; round += 1) {
       if (stopRequested) break;
       const snapshot = collectOrders(options, true);
       rows.push(...snapshot.rows);
       orderKeys.push(...snapshot.orderKeys);
-      snapshot.orderKeys.forEach((key) => seenOrderKeys.add(key));
       receiptDates.push(...snapshot.receiptDates);
 
       const visibleReceiptDates = snapshot.receiptDates.filter(Boolean);
@@ -1080,27 +1078,23 @@
       const scrolling = document.scrollingElement || document.documentElement;
       const viewportHeight = Math.max(window.innerHeight || 0, 600);
       window.scrollTo({
-        top: scrolling.scrollTop + Math.floor(viewportHeight * 0.55),
+        top: scrolling.scrollTop + Math.floor(viewportHeight * 0.82),
         behavior: 'auto'
       });
       updateOverlay(`Загружаю историю заказов… прокрутка ${round + 1}`);
-      // Give lazy-loaded cards time to render; keep Stop responsive.
-      for (let tick = 0; tick < 8 && !stopRequested; tick += 1) await wait(250);
+      await wait(850);
 
       if (stopRequested) break;
 
+      if (hasReachedRecommendations()) {
+        completionReason = 'Достигнут блок рекомендаций (проверка из опубликованного релиза).';
+        break;
+      }
 
       const currentTop = scrolling.scrollTop;
-      const currentHeight = scrolling.scrollHeight;
-      if (currentTop === previousTop && currentHeight === previousHeight &&
-          seenOrderKeys.size === previousOrderCount) stableRounds += 1;
+      if (currentTop === previousTop) stableRounds += 1;
       else stableRounds = 0;
       previousTop = currentTop;
-      previousHeight = currentHeight;
-      previousOrderCount = seenOrderKeys.size;
-      if (stableRounds > 0) {
-        updateOverlay(`Ожидаю подгрузку заказов… проверка ${stableRounds} из 6, найдено ${seenOrderKeys.size}`);
-      }
     }
 
     const uniqueRows = uniqueBy(rows, (row) => JSON.stringify(row));
@@ -1111,8 +1105,14 @@
       orderKeys: [...new Set(orderKeys)],
       earliestDate: dates[0] || '',
       earliestReceiptDate: sortedReceiptDates[0] || '',
+      completionReason,
       stoppedByReceiptDate
     };
+  }
+
+  function hasReachedRecommendations() {
+    return [...document.querySelectorAll('h1,h2,h3')]
+      .some((node) => /подобрали\s+по\s+вашим\s+интересам/i.test(clean(node.textContent)));
   }
 
   function clickLoadMore() {
@@ -1121,9 +1121,11 @@
     if (button && !button.disabled) button.click();
   }
 
+
   function collectOrders(options, viewportOnly = false) {
-    const anchors = findOrderAnchors().filter((anchor) => !viewportOnly || isNearViewport(anchor));
-    const cards = unique(anchors.map(findOrderCard).filter(Boolean));
+    const anchors = findOrderAnchors();
+    const cards = unique(anchors.map(findOrderCard).filter(Boolean))
+      .filter((card) => !viewportOnly || isNearViewport(card));
     const rows = [];
     const orderIds = new Set();
     const receiptDates = [];

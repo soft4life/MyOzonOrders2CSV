@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "OzonMyOrders2csv",
-  "version": "0.8.22",
+  "version": "0.8.26",
   "description": "Экспортирует историю заказов из личного кабинета покупателя Ozon в CSV.",
   "permissions": [
     "activeTab",

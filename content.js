@@ -825,7 +825,7 @@
     );
     const box = findProductBox(anchor, root);
     const pricingBox = findPricingContext(box, root);
-    const text = clean(pricingBox?.textContent || box?.textContent || product);
+    const text = readProductPriceText(pricingBox || box) || product;
     return {
       product,
       productUrl: absoluteUrl(anchor.getAttribute('href')),
@@ -853,7 +853,7 @@
         const hasProductAction = /в корзину|похожие товары|купить/i.test(clean(node.textContent));
         if (product && (hasImage || hasProductAction)) {
           const pricingBox = findPricingContext(node, root);
-          const pricingText = clean(pricingBox?.textContent || node.textContent);
+          const pricingText = readProductPriceText(pricingBox || node);
           const productHref = node.querySelector?.('a[href*="/product/"]')?.getAttribute('href') || '';
           products.push({
             product,
@@ -1225,6 +1225,18 @@
       }
     }
     return firstPriceBox || anchor.parentElement;
+  }
+
+  function readProductPriceText(node) {
+    if (!node) return '';
+    const hasMoney = (value) => /\d[\d\s.,]*\s*(?:₽|руб\.?)/i.test(value || '');
+    const candidates = [node, ...(node.querySelectorAll?.('span,div,p') || [])];
+    // Keep the smallest currency-bearing nodes. Seller names live outside them;
+    // joining a whole delivery block makes "Discounter 999" + "115 ₽" = 999115.
+    const amounts = candidates.filter((item) => hasMoney(item.textContent) &&
+      ![...(item.querySelectorAll?.('span,div,p') || [])].some((child) => hasMoney(child.textContent)));
+    if (amounts.length) return amounts.map((item) => item.textContent.trim()).join('\n');
+    return node.innerText || node.textContent || '';
   }
 
   function findPricingContext(start, root) {
